@@ -22,7 +22,10 @@ from pydantic import ValidationError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from offline_buffer import OfflineBuffer
+from oee import calculate_oee
 from validator import MachineProfile
+from watchdog import GatewayWatchdog, StaleSensorMonitor
 
 
 LOGGER = logging.getLogger("multi_machine_sim")
@@ -179,31 +182,32 @@ class MachineSimulation:
             motor_amps = self.random.uniform(0.08, 0.14) * self.nominal_motor_amps
 
         elapsed = max(self.elapsed_seconds + SAMPLE_INTERVAL_SECONDS, 1)
-        availability = self.running_seconds / elapsed
-        ideal_cycles = self.cycles_per_minute / 60.0 * self.running_seconds
-        performance = min(self.cycle_count / ideal_cycles, 1.0) if ideal_cycles else 0.0
-        quality = self.good_count / self.cycle_count if self.cycle_count else 1.0
+        oee_metrics = calculate_oee(
+            planned_shift_seconds=elapsed,
+            running_seconds=self.running_seconds,
+            cycle_count=self.cycle_count,
+            ideal_cycle_time_seconds=60.0 / self.cycles_per_minute if self.cycles_per_minute > 0 else None,
+            good_count=self.good_count,
+        )
         telemetry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "motor_amps": round(max(motor_amps, 0.0), 2),
             "cycle_count": self.cycle_count,
-            "oee": round(availability * performance * quality, 4),
-            "availability": round(availability, 4),
-            "performance": round(performance, 4),
-            "quality": round(quality, 4),
+            "oee": round(oee_metrics.oee, 4),
+            "availability": round(oee_metrics.availability, 4),
+            "performance": round(oee_metrics.performance, 4),
+            "quality": round(oee_metrics.quality, 4),
             "sensor_transport": self.machine.profile.sensor_transport,
         }
         self.elapsed_seconds += SAMPLE_INTERVAL_SECONDS
         return state, telemetry
 
 
-def _publish(client: mqtt.Client, topic: str, payload: str, retain: bool) -> None:
-    result = client.publish(topic, payload=payload, qos=0, retain=retain)
-    if result.rc != mqtt.MQTT_ERR_SUCCESS:
-        raise RuntimeError(f"MQTT publish failed for {topic}: error {result.rc}")
-
-
-def _publish_manifest(client: mqtt.Client, machines: list[ConfiguredMachine]) -> None:
+def _publish_manifest(
+    client: mqtt.Client,
+    machines: list[ConfiguredMachine],
+    buffer: OfflineBuffer | None = None,
+) -> None:
     by_site: dict[str, list[dict[str, Any]]] = {}
     for machine in machines:
         by_site.setdefault(machine.site_id, []).append(
@@ -217,27 +221,49 @@ def _publish_manifest(client: mqtt.Client, machines: list[ConfiguredMachine]) ->
             },
             separators=(",", ":"),
         )
-        _publish(client, f"mca/{site_id}/fleet/manifest", payload, retain=True)
+        topic = f"mca/{site_id}/fleet/manifest"
+        if buffer:
+            buffer.publish_or_queue(client, topic, payload, retain=True)
+        else:
+            result = client.publish(topic, payload=payload, qos=1, retain=True)
+            if result.rc != mqtt.MQTT_ERR_SUCCESS:
+                raise RuntimeError(f"MQTT publish failed for {topic}: error {result.rc}")
 
 
-def _machine_loop(client: mqtt.Client, machine: ConfiguredMachine, seed: int | None) -> None:
+def _machine_loop(
+    client: mqtt.Client,
+    machine: ConfiguredMachine,
+    seed: int | None,
+    buffer: OfflineBuffer | None = None,
+    sensor_monitor: StaleSensorMonitor | None = None,
+    stop: threading.Event | None = None,
+) -> None:
     seed_value = seed
     if seed_value is not None:
         seed_value += sum(ord(char) for char in f"{machine.site_id}/{machine.machine_id}")
     simulation = MachineSimulation(machine, seed=seed_value)
     base_topic = f"mca/{machine.site_id}/{machine.machine_id}"
 
-    while True:
+    while stop is None or not stop.is_set():
         state, telemetry = simulation.sample()
+        if sensor_monitor:
+            sensor_monitor.record_report(f"{machine.site_id}/{machine.machine_id}")
         try:
-            _publish(client, f"{base_topic}/status", state, retain=True)
-            _publish(
-                client,
-                f"{base_topic}/telemetry",
-                json.dumps(telemetry, separators=(",", ":")),
-                retain=False,
-            )
-        except (OSError, RuntimeError, mqtt.MQTTException):
+            status_topic = f"{base_topic}/status"
+            telemetry_topic = f"{base_topic}/telemetry"
+            telemetry_payload = json.dumps(telemetry, separators=(",", ":"), allow_nan=False)
+            if buffer:
+                buffer.publish_or_queue(client, status_topic, state, retain=True)
+                buffer.publish_or_queue(client, telemetry_topic, telemetry_payload, retain=False)
+            else:
+                for topic, payload, retain in (
+                    (status_topic, state, True),
+                    (telemetry_topic, telemetry_payload, False),
+                ):
+                    result = client.publish(topic, payload=payload, qos=1, retain=retain)
+                    if result.rc != mqtt.MQTT_ERR_SUCCESS:
+                        raise RuntimeError(f"MQTT publish failed for {topic}: error {result.rc}")
+        except (OSError, RuntimeError, ValueError, mqtt.MQTTException):
             LOGGER.exception("Publish failed for machine %s; retrying next interval", machine.machine_id)
         time.sleep(SAMPLE_INTERVAL_SECONDS)
 
@@ -257,6 +283,8 @@ def _parse_args() -> argparse.Namespace:
         help="MQTT broker port (default: MQTT_BROKER_PORT or 1883)",
     )
     parser.add_argument("--client-id", default="mca-edge-hub")
+    parser.add_argument("--buffer-db", type=Path, default=Path("edge_buffer.db"))
+    parser.add_argument("--stale-timeout-sec", type=float, default=60.0)
     parser.add_argument("--seed", type=int, help="Base seed for repeatable simulation")
     parser.add_argument("--verbose", action="store_true")
     return parser.parse_args()
@@ -280,7 +308,6 @@ def main() -> int:
         LOGGER.error("No valid machine profiles found in %s", args.config_dir)
         return 2
 
-    connected = threading.Event()
     client = mqtt.Client(
         callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
         client_id=args.client_id,
@@ -294,23 +321,72 @@ def main() -> int:
         _properties: Any,
     ) -> None:
         if reason_code == 0:
-            connected.set()
             LOGGER.info("Connected to MQTT broker at %s:%d", args.host, args.port)
         else:
             LOGGER.error("MQTT connection failed: %s", reason_code)
 
     client.on_connect = on_connect
     threads: list[threading.Thread] = []
+    stop = threading.Event()
+    buffer: OfflineBuffer | None = None
+    watchdogs: list[GatewayWatchdog] = []
+    sensor_monitor: StaleSensorMonitor | None = None
+    stale_thread: threading.Thread | None = None
     try:
-        client.connect(args.host, args.port, keepalive=60)
+        client.reconnect_delay_set(min_delay=1, max_delay=30)
+        client.connect_async(args.host, args.port, keepalive=60)
         client.loop_start()
-        if not connected.wait(timeout=10):
-            raise RuntimeError("Timed out waiting for MQTT broker connection")
-        _publish_manifest(client, machines)
+        buffer = OfflineBuffer(args.buffer_db)
+        buffer.start(client)
+        _publish_manifest(client, machines, buffer)
+        machines_by_site: dict[str, list[ConfiguredMachine]] = {}
+        for machine in machines:
+            machines_by_site.setdefault(machine.site_id, []).append(machine)
+
+        def sensor_transition(machine_id: str, status: str) -> None:
+            site_id, _, local_machine_id = machine_id.partition("/")
+            machine = next(
+                (
+                    item
+                    for item in machines
+                    if item.site_id == site_id and item.machine_id == local_machine_id
+                ),
+                None,
+            )
+            if not machine or not buffer:
+                return
+            topic = f"mca/{machine.site_id}/{machine.machine_id}/status"
+            payload = "IDLE" if status == "RECOVERED" else "OFFLINE_SENSOR"
+            try:
+                buffer.publish_or_queue(client, topic, payload, retain=True)
+            except (OSError, RuntimeError, ValueError):
+                LOGGER.exception("Unable to publish stale-sensor transition for %s", machine_id)
+
+        sensor_monitor = StaleSensorMonitor(
+            (f"{machine.site_id}/{machine.machine_id}" for machine in machines),
+            stale_timeout_sec=args.stale_timeout_sec,
+            on_transition=sensor_transition,
+        )
+
+        def monitor_staleness() -> None:
+            while not stop.wait(1):
+                sensor_monitor.check()
+
+        stale_thread = threading.Thread(target=monitor_staleness, name="sensor-stale-monitor", daemon=True)
+        stale_thread.start()
+        for site_id, site_machines in machines_by_site.items():
+            gateway_watchdog = GatewayWatchdog(
+                site_id=site_id,
+                client=client,
+                buffer=buffer,
+                active_machines=lambda count=len(site_machines): count,
+            )
+            gateway_watchdog.start()
+            watchdogs.append(gateway_watchdog)
         for machine in machines:
             thread = threading.Thread(
                 target=_machine_loop,
-                args=(client, machine, args.seed),
+                args=(client, machine, args.seed, buffer, sensor_monitor, stop),
                 name=f"machine-{machine.machine_id}",
                 daemon=True,
             )
@@ -325,6 +401,15 @@ def main() -> int:
         LOGGER.exception("Unable to start multi-machine simulator")
         return 1
     finally:
+        stop.set()
+        if stale_thread:
+            stale_thread.join(timeout=2)
+        for gateway_watchdog in watchdogs:
+            gateway_watchdog.close()
+        for thread in threads:
+            thread.join(timeout=2)
+        if buffer:
+            buffer.close()
         if client.is_connected():
             client.disconnect()
         client.loop_stop()

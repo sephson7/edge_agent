@@ -1,0 +1,45 @@
+{
+  "archetype": "conveyor_line",
+  "template_version": 1,
+  "template_locked": true,
+  "machine_type": "Material Handling Conveyor",
+  "site_id": "default",
+  "sensor_transport": "wired",
+  "ideal_cycle_time_seconds": 2,
+  "ideal_cycles_per_minute": 30,
+  "oee_parameters": {
+    "planned_shift_seconds": 28800,
+    "quality_target": 1.0
+  },
+  "channels": [
+    {
+      "channel_id": "DI1",
+      "name": "main_motor_ct",
+      "channel_type": "motor_current",
+      "debounce_ms": 250,
+      "read_only": true
+    },
+    {
+      "channel_id": "DI2",
+      "name": "part_counter",
+      "channel_type": "part_counter",
+      "debounce_ms": 50,
+      "read_only": true
+    },
+    {
+      "channel_id": "DI3",
+      "name": "fault_stack_light",
+      "channel_type": "stack_light",
+      "debounce_ms": 250,
+      "read_only": true
+    }
+  ],
+  "downtime_codes": [
+    "Jam / Backup",
+    "Photoeye Blocked",
+    "Drive Overload",
+    "Upstream Starve",
+    "Downstream Full",
+    "Maintenance"
+  ]
+}

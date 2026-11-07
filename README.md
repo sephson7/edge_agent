@@ -28,7 +28,7 @@ Operating strictly as a **read-only diagnostic tool** (similar to an automotive 
 ├── simulator/press_sim.py  # Simulated stamping-press MQTT telemetry
 ├── simulator/multi_machine_sim.py # Multi-machine Edge Hub MQTT publisher
 ├── configs/                # One validated MachineProfile JSON per machine
-├── templates/              # Base archetypes (stamping_press.json, cnc_mill.json, injection_molder.json)
+├── templates/              # Locked, deterministic Golden Archetype JSON templates
 └── sample_inputs/          # Test nameplate and control panel photos for local validation
 ```
 
@@ -37,10 +37,16 @@ Operating strictly as a **read-only diagnostic tool** (similar to an automotive 
 ## How the Onboarding Pipeline Works
 
 1. **Capture Field Inputs:** Technician uploads photos of the machine nameplate, interior control cabinet, and wired gateway channels via the MCA Field PWA.
-2. **Vision Extraction (`agent.py`):** Multimodal model extracts OEM make, model, serial number, voltage, and PLC family (e.g., *Minster P2-100 Stamping Press, Allen-Bradley SLC 5/04*).
-3. **Archetype & Tag Mapping:** Matches the machine against `/templates` to assign default ideal cycle rates, debounce timers, MQTT topic paths (`site/line/machine/metric`), and 6–8 machine-specific operator downtime reason codes.
-4. **Schema Validation (`validator.py`):** Validates the profile with Pydantic and rejects channels or register configurations that violate the read-only safeguards.
+2. **Nameplate Extraction (`agent.py`):** Multimodal model is restricted to OCR/classification fields only: archetype, OEM, model, serial number, voltage, PLC family, and confidence notes. It cannot generate channel maps, debounce settings, downtime codes, or OEE parameters.
+3. **Golden Archetype Merge:** The classified archetype selects one human-maintained template from `templates/`. `agent.py` merges only extracted metadata plus the requested machine ID, site ID, and sensor transport. Templates supply deterministic ideal cycle parameters, standard channels, debounce timers, and downtime reason codes.
+4. **Schema Validation (`validator.py`):** The merged profile is validated with Pydantic, enforcing `read_only: true` for every channel and rejecting writable register configurations.
 5. **Provisioning Output:** Exports `machine_config.json` ready for deployment to the edge gateway and PWA frontend.
+
+The locked templates are `stamping_press.json`, `cnc_mill.json`,
+`injection_molder.json`, `hydraulic_press.json`, and `conveyor_line.json`.
+Changes to template channel maps, debounce times, or production parameters are
+intentional code/configuration changes—not LLM output—and should be reviewed
+and tested before deployment.
 
 ---
 
@@ -77,8 +83,10 @@ omitted, the agent creates a clean ID from the extracted OEM and model.
 The agent defaults to Gemini; set `LLM_PROVIDER=openai` or pass
 `--provider openai` to use OpenAI. Set `GEMINI_API_KEY` or `OPENAI_API_KEY`
 (or the generic `LLM_API_KEY`), respectively. Model names can be overridden
-with `GEMINI_MODEL`, `OPENAI_MODEL`, or `--model`. The response is validated
-against `MachineProfile` before it is written.
+with `GEMINI_MODEL`, `OPENAI_MODEL`, or `--model`. The extraction response is
+validated against the strict `NameplateExtraction` model, merged with its
+Golden Archetype Template, then validated against `MachineProfile` before it
+is written.
 
 ### Onboard and Monitor Multiple Machines
 Run the agent once per machine. Assign a unique ID and site ID for every
@@ -97,6 +105,18 @@ telemetry to `mca/{site_id}/{machine_id}/telemetry`, and a retained fleet
 manifest to `mca/{site_id}/fleet/manifest`. Invalid profiles are logged and
 skipped; other valid machines continue publishing. MQTT broker settings use
 `MQTT_BROKER_HOST` and `MQTT_BROKER_PORT`.
+
+### Edge Reliability Safeguards
+`signal_filter.py` provides configurable discrete-input debounce (50 ms for
+counters and 250 ms for motor/stack-light transitions), median filtering for CT
+spikes, and `SENSOR_FAULT` reporting for readings outside 0–500 A. `oee.py`
+clamps Availability, Performance, Quality, and OEE to finite values in `[0, 1]`.
+Both simulator publishers durably queue outbound MQTT messages in the WAL-mode
+`edge_buffer.db`; a background worker replays acknowledged messages FIFO in
+batches of up to 50. The queue prunes oldest records at its 500 MiB default cap.
+The multi-machine publisher also emits a 10-second retained heartbeat at
+`mca/{site_id}/hub/health` and reports `OFFLINE_SENSOR` after 60 seconds without
+a machine report. Run the safeguards suite with `pytest -q tests/test_safeguards.py`.
 
 ---
 

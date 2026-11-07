@@ -19,6 +19,7 @@ from pydantic import ValidationError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from offline_buffer import OfflineBuffer
 from validator import MachineProfile
 
 
@@ -130,23 +131,23 @@ def publish_forever(
     client: mqtt.Client,
     topic_prefix: str,
     simulation: PressSimulation,
-    connected: threading.Event,
+    connected: threading.Event | None = None,
+    buffer: OfflineBuffer | None = None,
 ) -> None:
-    if not connected.wait(timeout=10):
+    if connected is not None and not connected.wait(timeout=10):
         raise RuntimeError("Timed out waiting for MQTT broker connection")
 
     next_sample_at = time.monotonic()
     while True:
         sample = simulation.sample()
         for metric, value in sample.items():
-            result = client.publish(
-                f"{topic_prefix}/{metric}",
-                payload=str(value),
-                qos=0,
-                retain=False,
-            )
-            if result.rc != mqtt.MQTT_ERR_SUCCESS:
-                raise RuntimeError(f"Failed to publish {metric}: MQTT error {result.rc}")
+            topic = f"{topic_prefix}/{metric}"
+            if buffer:
+                buffer.publish_or_queue(client, topic, str(value), retain=False)
+            else:
+                result = client.publish(topic, payload=str(value), qos=1, retain=False)
+                if result.rc != mqtt.MQTT_ERR_SUCCESS:
+                    raise RuntimeError(f"Failed to publish {metric}: MQTT error {result.rc}")
         LOGGER.info(
             "state=%s motor_amperage=%.2f A part_count=%d",
             sample["state"],
@@ -196,7 +197,6 @@ def main() -> int:
         LOGGER.error("Invalid machine profile or simulator configuration: %s", exc)
         return 2
 
-    connected = threading.Event()
     client = mqtt.Client(
         callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
         client_id=args.client_id,
@@ -210,22 +210,27 @@ def main() -> int:
         _properties: Any,
     ) -> None:
         if reason_code == 0:
-            connected.set()
             LOGGER.info("Connected to MQTT broker at %s:%d", args.host, args.port)
         else:
             LOGGER.error("MQTT connection failed: %s", reason_code)
 
     client.on_connect = on_connect
+    buffer: OfflineBuffer | None = None
     try:
-        client.connect(args.host, args.port, keepalive=60)
+        client.reconnect_delay_set(min_delay=1, max_delay=30)
+        client.connect_async(args.host, args.port, keepalive=60)
         client.loop_start()
-        publish_forever(client, topic_prefix, simulation, connected)
+        buffer = OfflineBuffer("edge_buffer.db")
+        buffer.start(client)
+        publish_forever(client, topic_prefix, simulation, buffer=buffer)
     except KeyboardInterrupt:
         LOGGER.info("Stopping press simulator")
     except (OSError, RuntimeError, ValueError, mqtt.MQTTException) as exc:
         LOGGER.error("%s", exc)
         return 1
     finally:
+        if buffer:
+            buffer.close()
         if client.is_connected():
             client.disconnect()
         client.loop_stop()

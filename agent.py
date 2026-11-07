@@ -10,10 +10,10 @@ import mimetypes
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from dotenv import load_dotenv
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from validator import MachineProfile
 
@@ -23,22 +23,33 @@ DEFAULT_OPENAI_MODEL = "gpt-4o"
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 
 EXTRACTION_PROMPT = """\
-Inspect both attached machine images and create a practical machine profile.
-Use the nameplate to identify OEM, model, serial number, voltage, and other
-legible specifications. Use the control-panel image to identify the PLC family,
-visible protocols, and observable diagnostic channels. Include useful machine
-metadata and a channel entry for each confidently identified diagnostic input.
-Do not invent unreadable values; omit unknown optional values.
-
-This is a strictly read-only diagnostic system. Every channel must have
-read_only set to true. Never include a register configuration that grants write
-permissions. Include only passive polling or non-invasive measurement details.
-For unrecognized values, follow the supplied MachineProfile JSON schema and
-return a single JSON object only.
-
-MachineProfile JSON schema:
-{schema}
+Inspect the attached nameplate and control panel images. Classify the machine
+using exactly one supplied archetype: stamping_press, cnc_mill,
+injection_molder, hydraulic_press, or conveyor_line. Extract only the visible
+OEM, model, serial number, voltage, and PLC family. Use null for illegible or
+unavailable fields and briefly explain uncertainty in confidence_notes. Do not
+output channels, debounce settings, downtime codes, OEE settings, or any
+machine configuration. Return only the requested NameplateExtraction JSON.
 """
+
+class NameplateExtraction(BaseModel):
+    """Only OCR and archetype classification fields permitted from the LLM."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    archetype: Literal[
+        "stamping_press",
+        "cnc_mill",
+        "injection_molder",
+        "hydraulic_press",
+        "conveyor_line",
+    ]
+    oem: str | None = None
+    model: str | None = None
+    serial_number: str | None = None
+    voltage: str | None = None
+    plc_family: str | None = None
+    confidence_notes: str = ""
 
 
 def _read_image(path: Path) -> tuple[str, bytes]:
@@ -57,8 +68,7 @@ def _read_image(path: Path) -> tuple[str, bytes]:
 
 
 def _prompt() -> str:
-    schema = MachineProfile.model_json_schema(mode="validation")
-    return EXTRACTION_PROMPT.format(schema=json.dumps(schema, indent=2))
+    return EXTRACTION_PROMPT
 
 
 def _extract_with_openai(
@@ -66,7 +76,7 @@ def _extract_with_openai(
     model: str,
     nameplate: tuple[str, bytes],
     panel: tuple[str, bytes],
-) -> dict[str, Any]:
+) -> NameplateExtraction:
     try:
         from openai import APIError, OpenAI
     except ImportError as exc:
@@ -90,8 +100,8 @@ def _extract_with_openai(
             response_format={
                 "type": "json_schema",
                 "json_schema": {
-                    "name": "machine_profile",
-                    "schema": MachineProfile.model_json_schema(mode="validation"),
+                    "name": "nameplate_extraction",
+                    "schema": NameplateExtraction.model_json_schema(mode="validation"),
                     "strict": False,
                 },
             },
@@ -101,14 +111,17 @@ def _extract_with_openai(
 
     output = response.choices[0].message.content
     if not output:
-        raise RuntimeError("OpenAI returned an empty machine profile")
+        raise RuntimeError("OpenAI returned an empty nameplate extraction")
     try:
         parsed = json.loads(output)
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"OpenAI returned invalid JSON: {exc}") from exc
     if not isinstance(parsed, dict):
         raise RuntimeError("OpenAI response must be a JSON object")
-    return parsed
+    try:
+        return NameplateExtraction.model_validate(parsed)
+    except ValidationError as exc:
+        raise RuntimeError(f"OpenAI response did not match NameplateExtraction: {exc}") from exc
 
 
 def _extract_with_gemini(
@@ -116,7 +129,7 @@ def _extract_with_gemini(
     model: str,
     nameplate: tuple[str, bytes],
     panel: tuple[str, bytes],
-) -> dict[str, Any]:
+) -> NameplateExtraction:
     try:
         from google import genai
         from google.genai import errors, types
@@ -134,7 +147,7 @@ def _extract_with_gemini(
             contents=contents,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
-                response_schema=MachineProfile,
+                response_schema=NameplateExtraction,
             ),
         )
     except errors.APIError as exc:
@@ -142,54 +155,88 @@ def _extract_with_gemini(
 
     output = response.text
     if not output:
-        raise RuntimeError("Gemini returned an empty machine profile")
+        raise RuntimeError("Gemini returned an empty nameplate extraction")
     try:
         parsed = json.loads(output)
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"Gemini returned invalid JSON: {exc}") from exc
     if not isinstance(parsed, dict):
         raise RuntimeError("Gemini response must be a JSON object")
-    return parsed
+    try:
+        return NameplateExtraction.model_validate(parsed)
+    except ValidationError as exc:
+        raise RuntimeError(f"Gemini response did not match NameplateExtraction: {exc}") from exc
 
 
-def extract_profile(
+def extract_nameplate(
     provider: str,
     api_key: str,
     model: str,
     nameplate_path: Path,
     panel_path: Path,
-) -> MachineProfile:
-    """Send images to the selected multimodal provider and validate its profile."""
+) -> NameplateExtraction:
+    """Send images to the selected multimodal provider for metadata extraction."""
 
     nameplate = _read_image(nameplate_path)
     panel = _read_image(panel_path)
     if provider == "openai":
-        data = _extract_with_openai(api_key, model, nameplate, panel)
+        extraction = _extract_with_openai(api_key, model, nameplate, panel)
     elif provider == "gemini":
-        data = _extract_with_gemini(api_key, model, nameplate, panel)
+        extraction = _extract_with_gemini(api_key, model, nameplate, panel)
     else:
         raise ValueError(f"Unsupported provider: {provider}")
-    return MachineProfile.model_validate(data)
+    return extraction
 
 
-def _machine_slug(*values: Any) -> str:
+def merge_extraction_with_template(
+    extraction: NameplateExtraction,
+    *,
+    machine_id: str,
+    site_id: str,
+    sensor_transport: str,
+    templates_dir: Path | None = None,
+) -> MachineProfile:
+    """Merge extracted metadata into a deterministic, read-only archetype."""
+
+    template_root = templates_dir or Path(__file__).resolve().parent / "templates"
+    template_path = template_root / f"{extraction.archetype}.json"
+    try:
+        template_data = json.loads(template_path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ValueError(f"Unable to read archetype template '{template_path}': {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Archetype template '{template_path}' is not valid JSON: {exc}") from exc
+    if not isinstance(template_data, dict):
+        raise ValueError(f"Archetype template '{template_path}' must contain a JSON object")
+    if template_data.get("archetype") != extraction.archetype:
+        raise ValueError(
+            f"Archetype template '{template_path}' does not match '{extraction.archetype}'"
+        )
+
+    merged = dict(template_data)
+    merged.update(
+        {
+            "machine_id": machine_id,
+            "site_id": site_id,
+            "sensor_transport": sensor_transport,
+        }
+    )
+    extracted_metadata = extraction.model_dump(
+        mode="json",
+        exclude={"archetype", "confidence_notes"},
+        exclude_none=True,
+    )
+    merged.update(extracted_metadata)
+    return MachineProfile.model_validate(merged)
+
+
+def _machine_slug(*values: str | None) -> str:
     source = "-".join(str(value).strip() for value in values if value)
     slug = re.sub(r"[^a-z0-9]+", "_", source.lower()).strip("_")
     slug = re.sub(r"_+", "_", slug)
     if not slug:
         raise ValueError("Could not derive a machine ID; provide --machine-id")
     return slug[:64].rstrip("_-")
-
-
-def _derived_machine_id(profile: MachineProfile) -> str:
-    data = profile.model_dump(mode="python")
-    make = data.get("oem") or data.get("manufacturer") or data.get("make")
-    model = data.get("model") or data.get("model_number")
-    machine = data.get("machine")
-    if isinstance(machine, dict):
-        make = make or machine.get("oem") or machine.get("manufacturer") or machine.get("make")
-        model = model or machine.get("model")
-    return _machine_slug(make, model)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -235,13 +282,14 @@ def main() -> int:
 
     output_path: Path | None = None
     try:
-        profile = extract_profile(args.provider, api_key, model, args.nameplate, args.panel)
-        machine_id = _machine_slug(args.machine_id) if args.machine_id else _derived_machine_id(profile)
-        profile_data = profile.model_dump(mode="python")
-        profile_data["machine_id"] = machine_id
-        profile_data["site_id"] = args.site_id
-        profile_data["sensor_transport"] = args.sensor_transport
-        profile = MachineProfile.model_validate(profile_data)
+        extraction = extract_nameplate(args.provider, api_key, model, args.nameplate, args.panel)
+        machine_id = _machine_slug(args.machine_id) if args.machine_id else _machine_slug(extraction.oem, extraction.model)
+        profile = merge_extraction_with_template(
+            extraction,
+            machine_id=machine_id,
+            site_id=args.site_id,
+            sensor_transport=args.sensor_transport,
+        )
         output_path = Path("configs") / f"{machine_id}.json"
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(

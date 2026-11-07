@@ -1,0 +1,45 @@
+{
+  "archetype": "hydraulic_press",
+  "template_version": 1,
+  "template_locked": true,
+  "machine_type": "Hydraulic Forming Press",
+  "site_id": "default",
+  "sensor_transport": "wired",
+  "ideal_cycle_time_seconds": 8,
+  "ideal_cycles_per_minute": 7.5,
+  "oee_parameters": {
+    "planned_shift_seconds": 28800,
+    "quality_target": 1.0
+  },
+  "channels": [
+    {
+      "channel_id": "DI1",
+      "name": "main_motor_ct",
+      "channel_type": "motor_current",
+      "debounce_ms": 250,
+      "read_only": true
+    },
+    {
+      "channel_id": "DI2",
+      "name": "part_counter",
+      "channel_type": "part_counter",
+      "debounce_ms": 50,
+      "read_only": true
+    },
+    {
+      "channel_id": "DI3",
+      "name": "fault_stack_light",
+      "channel_type": "stack_light",
+      "debounce_ms": 250,
+      "read_only": true
+    }
+  ],
+  "downtime_codes": [
+    "Oil Temp High",
+    "Pressure Drop",
+    "Die Setup",
+    "Sensor Fault",
+    "Part Load Delay",
+    "Maintenance"
+  ]
+}

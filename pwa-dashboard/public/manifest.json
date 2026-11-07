@@ -1,0 +1,21 @@
+{
+  "id": "/",
+  "name": "MCA Machine Health",
+  "short_name": "MCA Health",
+  "description": "Read-only machine health monitoring by Motorcity Automated Systems, LLC.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "landscape",
+  "background_color": "#0B0F14",
+  "theme_color": "#0B0F14",
+  "categories": ["business", "productivity"],
+  "icons": [
+    {
+      "src": "/machine-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
