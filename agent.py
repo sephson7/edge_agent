@@ -243,10 +243,34 @@ def _machine_slug(*values: str | None) -> str:
     return slug[:64].rstrip("_-")
 
 
+def _mock_dry_run_extraction(archetype: str) -> NameplateExtraction:
+    archetype_choices = (
+        "stamping_press",
+        "cnc_mill",
+        "injection_molder",
+        "hydraulic_press",
+        "conveyor_line",
+        "bottling_filler_line",
+        "food_packaging_wrapper",
+        "industrial_oven_mixer",
+    )
+    if archetype not in archetype_choices:
+        raise ValueError(f"Unsupported dry-run archetype '{archetype}'")
+    return NameplateExtraction(
+        archetype=archetype,
+        oem="Minster",
+        model="P2-100",
+        serial_number="SN-DRY-RUN-001",
+        voltage="480V",
+        plc_family="Allen-Bradley SLC 5/04",
+        confidence_notes="Dry-run mock extraction uses deterministic fixture data without external API calls.",
+    )
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--nameplate", required=True, type=Path, help="Machine nameplate image path")
-    parser.add_argument("--panel", required=True, type=Path, help="Control-panel image path")
+    parser.add_argument("--nameplate", type=Path, help="Machine nameplate image path")
+    parser.add_argument("--panel", type=Path, help="Control-panel image path")
     parser.add_argument(
         "--provider",
         choices=("gemini", "openai"),
@@ -257,13 +281,22 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--site-id", default="default", help="Site ID for UNS topic routing (default: default)")
     parser.add_argument(
         "--sensor-transport",
-        choices=("wired", "wireless_900mhz"),
+        choices=("wired", "wireless_900mhz", "wireless_lorawan"),
         default="wired",
         help="Machine sensor transport (default: wired)",
     )
     parser.add_argument("--model", help="Override the provider's default model")
+    parser.add_argument("--dry-run", action="store_true", help="Generate a deterministic mock profile without external API calls")
+    parser.add_argument(
+        "--dry-run-archetype",
+        default="stamping_press",
+        help="Archetype to use when --dry-run is enabled (default: stamping_press)",
+    )
     parser.add_argument("--verbose", action="store_true", help="Log extraction progress")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if not args.dry_run and (args.nameplate is None or args.panel is None):
+        parser.error("--nameplate and --panel are required unless --dry-run is used")
+    return args
 
 
 def main() -> int:
@@ -273,6 +306,36 @@ def main() -> int:
         level=logging.INFO if args.verbose else logging.WARNING,
         format="%(asctime)s %(levelname)s %(message)s",
     )
+
+    if args.dry_run:
+        try:
+            extraction = _mock_dry_run_extraction(args.dry_run_archetype)
+        except ValueError as exc:
+            LOGGER.error("Dry-run configuration failed: %s", exc)
+            return 1
+        machine_id = _machine_slug(args.machine_id) if args.machine_id else _machine_slug(extraction.oem, extraction.model)
+        try:
+            profile = merge_extraction_with_template(
+                extraction,
+                machine_id=machine_id,
+                site_id=args.site_id,
+                sensor_transport=args.sensor_transport,
+            )
+            output_path = Path("configs") / f"{machine_id}.json"
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(
+                json.dumps(profile.model_dump(mode="json"), indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+        except (OSError, ValueError, ValidationError, RuntimeError) as exc:
+            LOGGER.error("Dry-run machine profile generation failed: %s", exc)
+            return 1
+        LOGGER.info("Saved validated dry-run machine profile to %s", output_path)
+        return 0
+
+    if not args.nameplate or not args.panel:
+        raise ValueError("--nameplate and --panel are required unless --dry-run is used")
+
     provider_env = "OPENAI_API_KEY" if args.provider == "openai" else "GEMINI_API_KEY"
     api_key = os.getenv(provider_env) or os.getenv("LLM_API_KEY")
     if not api_key:

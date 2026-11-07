@@ -96,7 +96,8 @@ class ChannelConfig(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    read_only: Literal[True] = True
+    channel_id: str
+    read_only: Literal[True]
 
 
 class MachineProfile(BaseModel):
@@ -106,8 +107,9 @@ class MachineProfile(BaseModel):
 
     machine_id: str = ""
     site_id: str = Field(default="default", pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$")
-    sensor_transport: Literal["wired", "wireless_900mhz"] = "wired"
+    sensor_transport: Literal["wired", "wireless_900mhz", "wireless_lorawan"] = "wired"
     channels: list[ChannelConfig] | dict[str, ChannelConfig] = Field(default_factory=list)
+    downtime_codes: list[str] = Field(default_factory=list)
 
     @field_validator("machine_id")
     @classmethod
@@ -115,6 +117,37 @@ class MachineProfile(BaseModel):
         if value and not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", value):
             raise ValueError("machine_id must be a lowercase MQTT-safe identifier")
         return value
+
+    @model_validator(mode="after")
+    def validate_read_only_profile(self) -> "MachineProfile":
+        allowed_transports = {"wired", "wireless_900mhz", "wireless_lorawan"}
+        if self.sensor_transport not in allowed_transports:
+            raise ValueError(
+                "sensor_transport must be one of: wired, wireless_900mhz, wireless_lorawan"
+            )
+
+        channel_entries: list[ChannelConfig] = []
+        if isinstance(self.channels, dict):
+            channel_entries.extend(self.channels.values())
+        else:
+            channel_entries.extend(self.channels)
+
+        seen_ids: set[str] = set()
+        for channel in channel_entries:
+            if not isinstance(channel, ChannelConfig):
+                continue
+            if channel.channel_id in seen_ids:
+                raise ValueError(f"Duplicate channel_id '{channel.channel_id}' is not allowed")
+            seen_ids.add(channel.channel_id)
+            if channel.read_only is not True:
+                raise ValueError(f"Channel '{channel.channel_id}' must set read_only to true")
+
+        if not channel_entries:
+            raise ValueError("Machine profile must define at least one channel")
+        if not self.downtime_codes:
+            raise ValueError("Machine profile must define at least one downtime code")
+
+        return self
 
     @model_validator(mode="before")
     @classmethod

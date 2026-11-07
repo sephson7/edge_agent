@@ -92,9 +92,21 @@ validated against the strict `NameplateExtraction` model, merged with its
 Golden Archetype Template, then validated against `MachineProfile` before it
 is written.
 
+### Dry-Run Validation Without an API Key
+Use `--dry-run` to generate a deterministic mock extraction and validate the
+resulting profile without calling Gemini/OpenAI or requiring an API key.
+```bash
+python agent.py --dry-run --machine-id press_dry_run --site-id plant_01 --dry-run-archetype stamping_press
+```
+This writes the merged config to `./configs/press_dry_run.json` using a Minster
+P2-100 fixture profile and the selected Golden Archetype Template. `--dry-run`
+usefully smoke-tests profile generation in CI or local validation without any
+external dependencies.
+
 ### Onboard and Monitor Multiple Machines
 Run the agent once per machine. Assign a unique ID and site ID for every
-machine; `--sensor-transport` may be `wired` or `wireless_900mhz`.
+machine; `--sensor-transport` may be `wired`, `wireless_900mhz`, or
+`wireless_lorawan`.
 ```bash
 python agent.py --nameplate ./sample_inputs/minster_nameplate.jpg --panel ./sample_inputs/slc500_cabinet.jpg --machine-id press_01 --site-id plant_01 --sensor-transport wired
 python agent.py --nameplate ./sample_inputs/haas_nameplate.jpg --panel ./sample_inputs/haas_panel.jpg --machine-id haas_03 --site-id plant_01 --sensor-transport wireless_900mhz

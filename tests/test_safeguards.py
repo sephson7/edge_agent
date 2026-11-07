@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import sqlite3
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +13,7 @@ from offline_buffer import OfflineBuffer
 from signal_filter import AnalogCTFilter, DiscreteDebouncer, SignalFilter
 from validator import MachineProfile
 from watchdog import GatewayWatchdog, StaleSensorMonitor
-from agent import NameplateExtraction, merge_extraction_with_template
+from agent import NameplateExtraction, main, merge_extraction_with_template
 
 
 class FakePublishResult:
@@ -98,8 +100,9 @@ def test_signal_filter_reads_debounce_configuration_from_machine_profile() -> No
     profile = MachineProfile.model_validate(
         {
             "channels": [
-                {"channel_id": "DI1", "name": "main_motor_ct", "debounce_ms": 400},
-            ]
+                {"channel_id": "DI1", "name": "main_motor_ct", "debounce_ms": 400, "read_only": True},
+            ],
+            "downtime_codes": ["Maintenance"],
         }
     )
     filters = SignalFilter.from_channels(profile.channels)
@@ -325,4 +328,54 @@ def test_nameplate_extraction_forbids_generated_configuration() -> None:
     with pytest.raises(ValueError):
         NameplateExtraction.model_validate(
             {**extraction.model_dump(), "channels": [{"read_only": True}]}
+        )
+
+
+def test_dry_run_generates_profile_without_api_key(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.setattr(sys, "argv", ["agent.py", "--dry-run", "--machine-id", "dry_run_press"])
+
+    assert main() == 0
+    output_path = tmp_path / "configs" / "dry_run_press.json"
+    assert output_path.exists()
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["archetype"] == "stamping_press"
+    assert payload["oem"] == "Minster"
+    assert payload["machine_id"] == "dry_run_press"
+    assert payload["sensor_transport"] == "wired"
+
+
+def test_machine_profile_rejects_duplicate_channel_ids_and_invalid_transports() -> None:
+    with pytest.raises(ValueError):
+        MachineProfile.model_validate(
+            {
+                "machine_id": "press_01",
+                "channels": [
+                    {"channel_id": "DI1", "read_only": True},
+                    {"channel_id": "DI1", "read_only": True},
+                ],
+                "downtime_codes": ["Die Jam"],
+            }
+        )
+
+    with pytest.raises(ValueError):
+        MachineProfile.model_validate(
+            {
+                "machine_id": "press_01",
+                "sensor_transport": "wireless_5g",
+                "channels": [{"channel_id": "DI1", "read_only": True}],
+                "downtime_codes": ["Die Jam"],
+            }
+        )
+
+    with pytest.raises(ValueError):
+        MachineProfile.model_validate(
+            {
+                "machine_id": "press_01",
+                "channels": [{"channel_id": "DI1"}],
+                "downtime_codes": ["Die Jam"],
+            }
         )
