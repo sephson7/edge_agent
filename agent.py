@@ -20,7 +20,7 @@ from validator import MachineProfile
 
 LOGGER = logging.getLogger("agent")
 DEFAULT_OPENAI_MODEL = "gpt-4o"
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
 
 EXTRACTION_PROMPT = """\
 Inspect the attached nameplate and control panel images. Classify the machine
