@@ -331,6 +331,21 @@ def test_nameplate_extraction_forbids_generated_configuration() -> None:
         )
 
 
+def test_nameplate_schema_omits_gemini_unsupported_additional_properties() -> None:
+    def contains_additional_properties(value: Any) -> bool:
+        if isinstance(value, dict):
+            return any(
+                key in {"additionalProperties", "additional_properties"}
+                or contains_additional_properties(child)
+                for key, child in value.items()
+            )
+        if isinstance(value, list):
+            return any(contains_additional_properties(item) for item in value)
+        return False
+
+    assert not contains_additional_properties(NameplateExtraction.model_json_schema())
+
+
 def test_dry_run_generates_profile_without_api_key(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)

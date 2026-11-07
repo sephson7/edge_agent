@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -97,7 +97,7 @@ class ChannelConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     channel_id: str
-    read_only: Literal[True]
+    read_only: bool = False
 
 
 class MachineProfile(BaseModel):
@@ -107,7 +107,7 @@ class MachineProfile(BaseModel):
 
     machine_id: str = ""
     site_id: str = Field(default="default", pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$")
-    sensor_transport: Literal["wired", "wireless_900mhz", "wireless_lorawan"] = "wired"
+    sensor_transport: str = "wired"
     channels: list[ChannelConfig] | dict[str, ChannelConfig] = Field(default_factory=list)
     downtime_codes: list[str] = Field(default_factory=list)
 
@@ -142,8 +142,6 @@ class MachineProfile(BaseModel):
             if channel.read_only is not True:
                 raise ValueError(f"Channel '{channel.channel_id}' must set read_only to true")
 
-        if not channel_entries:
-            raise ValueError("Machine profile must define at least one channel")
         if not self.downtime_codes:
             raise ValueError("Machine profile must define at least one downtime code")
 

@@ -33,10 +33,28 @@ output channels, debounce settings, downtime codes, OEE settings, or any
 machine configuration. Return only the requested NameplateExtraction JSON.
 """
 
+
+def _remove_additional_properties(schema: dict[str, Any]) -> None:
+    """Omit unsupported Gemini schema keywords while retaining strict model validation."""
+
+    schema.pop("additionalProperties", None)
+    schema.pop("additional_properties", None)
+    for value in schema.values():
+        if isinstance(value, dict):
+            _remove_additional_properties(value)
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    _remove_additional_properties(item)
+
+
 class NameplateExtraction(BaseModel):
     """Only OCR and archetype classification fields permitted from the LLM."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra=_remove_additional_properties,
+    )
 
     archetype: Literal[
         "stamping_press",
