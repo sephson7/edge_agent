@@ -1,0 +1,45 @@
+{
+  "archetype": "bottling_filler_line",
+  "template_version": 1,
+  "template_locked": true,
+  "machine_type": "Bottling Filler Line",
+  "site_id": "default",
+  "sensor_transport": "wired",
+  "ideal_cycle_time_seconds": 0.8,
+  "ideal_cycles_per_minute": 75,
+  "oee_parameters": {
+    "planned_shift_seconds": 28800,
+    "quality_target": 1.0
+  },
+  "channels": [
+    {
+      "channel_id": "DI1",
+      "name": "main_drive_ct",
+      "channel_type": "motor_current",
+      "debounce_ms": 250,
+      "read_only": true
+    },
+    {
+      "channel_id": "DI2",
+      "name": "bottle_optical_counter",
+      "channel_type": "part_counter",
+      "debounce_ms": 20,
+      "read_only": true
+    },
+    {
+      "channel_id": "DI3",
+      "name": "fault_stack_light",
+      "channel_type": "stack_light",
+      "debounce_ms": 100,
+      "read_only": true
+    }
+  ],
+  "downtime_codes": [
+    "Bottle Jam",
+    "Capper Fault",
+    "Label Roll Change",
+    "No-Bottle Starve",
+    "Washdown / Sanitize",
+    "Maintenance"
+  ]
+}

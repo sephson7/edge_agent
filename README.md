@@ -42,8 +42,12 @@ Operating strictly as a **read-only diagnostic tool** (similar to an automotive 
 4. **Schema Validation (`validator.py`):** The merged profile is validated with Pydantic, enforcing `read_only: true` for every channel and rejecting writable register configurations.
 5. **Provisioning Output:** Exports `machine_config.json` ready for deployment to the edge gateway and PWA frontend.
 
-The locked templates are `stamping_press.json`, `cnc_mill.json`,
-`injection_molder.json`, `hydraulic_press.json`, and `conveyor_line.json`.
+The eight locked archetypes are `stamping_press`, `cnc_mill`,
+`injection_molder`, `hydraulic_press`, `conveyor_line`,
+`bottling_filler_line`, `food_packaging_wrapper`, and
+`industrial_oven_mixer`. Each template defines fixed read-only channels,
+debounce intervals, production parameters, and archetype-specific downtime
+codes.
 Changes to template channel maps, debounce times, or production parameters are
 intentional code/configuration changes—not LLM output—and should be reviewed
 and tested before deployment.

@@ -255,9 +255,22 @@ def test_gateway_health_contains_required_health_metrics(tmp_path: Path) -> None
         "injection_molder",
         "hydraulic_press",
         "conveyor_line",
+        "bottling_filler_line",
+        "food_packaging_wrapper",
+        "industrial_oven_mixer",
     ],
 )
 def test_golden_archetype_merge_is_valid_and_read_only(archetype: str) -> None:
+    expected_channels = {
+        "bottling_filler_line": ["main_drive_ct", "bottle_optical_counter", "fault_stack_light"],
+        "food_packaging_wrapper": ["main_drive_ct", "finished_pack_photoeye", "fault_stack_light"],
+        "industrial_oven_mixer": ["mixer_drive_ct", "batch_cycle_pulse", "high_temp_burner_fault"],
+    }
+    expected_debounce = {
+        "bottling_filler_line": [250, 20, 100],
+        "food_packaging_wrapper": [250, 30, 100],
+        "industrial_oven_mixer": [250, 100, 100],
+    }
     extraction = NameplateExtraction(
         archetype=archetype,
         oem="Example OEM",
@@ -285,13 +298,17 @@ def test_golden_archetype_merge_is_valid_and_read_only(archetype: str) -> None:
     assert profile.plc_family == "Allen-Bradley SLC 500"
     assert profile.template_locked is True
     assert [channel.channel_id for channel in profile.channels] == ["DI1", "DI2", "DI3"]
-    assert [channel.name for channel in profile.channels] == [
-        "main_motor_ct",
-        "part_counter",
-        "fault_stack_light",
-    ]
     assert all(channel.read_only is True for channel in profile.channels)
-    assert [channel.debounce_ms for channel in profile.channels] == [250, 50, 250]
+    if archetype in expected_channels:
+        assert [channel.name for channel in profile.channels] == expected_channels[archetype]
+        assert [channel.debounce_ms for channel in profile.channels] == expected_debounce[archetype]
+    else:
+        assert [channel.name for channel in profile.channels] == [
+            "main_motor_ct",
+            "part_counter",
+            "fault_stack_light",
+        ]
+        assert [channel.debounce_ms for channel in profile.channels] == [250, 50, 250]
     assert len(profile.downtime_codes) == 6
 
 

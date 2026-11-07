@@ -25,8 +25,9 @@ DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 EXTRACTION_PROMPT = """\
 Inspect the attached nameplate and control panel images. Classify the machine
 using exactly one supplied archetype: stamping_press, cnc_mill,
-injection_molder, hydraulic_press, or conveyor_line. Extract only the visible
-OEM, model, serial number, voltage, and PLC family. Use null for illegible or
+injection_molder, hydraulic_press, conveyor_line, bottling_filler_line,
+food_packaging_wrapper, or industrial_oven_mixer. Extract only the visible OEM,
+model, serial number, voltage, and PLC family. Use null for illegible or
 unavailable fields and briefly explain uncertainty in confidence_notes. Do not
 output channels, debounce settings, downtime codes, OEE settings, or any
 machine configuration. Return only the requested NameplateExtraction JSON.
@@ -43,6 +44,9 @@ class NameplateExtraction(BaseModel):
         "injection_molder",
         "hydraulic_press",
         "conveyor_line",
+        "bottling_filler_line",
+        "food_packaging_wrapper",
+        "industrial_oven_mixer",
     ]
     oem: str | None = None
     model: str | None = None
