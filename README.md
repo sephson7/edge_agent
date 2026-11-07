@@ -24,10 +24,12 @@ Operating strictly as a **read-only diagnostic tool** (similar to an automotive 
 ├── README.md               # Architecture and usage guide
 ├── requirements.txt        # Python dependencies
 ├── agent.py                # Main Vision-to-JSON extraction & classification pipeline
+├── upload_server.py        # Standalone onboarding API and native industrial HMI
 ├── validator.py            # Pydantic schema enforcement & read-only safety checks
 ├── simulator/press_sim.py  # Simulated stamping-press MQTT telemetry
 ├── simulator/multi_machine_sim.py # Multi-machine Edge Hub MQTT publisher
 ├── configs/                # One validated MachineProfile JSON per machine
+├── deployed_configs/       # Human-approved configs partitioned by site_id
 ├── templates/              # Locked, deterministic Golden Archetype JSON templates
 └── sample_inputs/          # Test nameplate and control panel photos for local validation
 ```
@@ -102,6 +104,29 @@ This writes the merged config to `./configs/press_dry_run.json` using a Minster
 P2-100 fixture profile and the selected Golden Archetype Template. `--dry-run`
 usefully smoke-tests profile generation in CI or local validation without any
 external dependencies.
+
+### Self-Contained Multi-Tenant HMI
+Run the standalone FastAPI server from the repository root:
+```bash
+python upload_server.py
+```
+Open port `8000` in GitHub Codespaces. The technician onboarding page accepts a
+mobile camera photo, selects an existing plant or creates a new site, and runs
+the normal `agent.py` extraction and validation pipeline. The validated JSON
+must then be explicitly approved by a human before it is written to
+`deployed_configs/{site_id}/{machine_id}.json`. The seeded site is
+`highland_park_plant_01`; omitted or `default` site IDs map to that tenant.
+The site registry is persisted in `deployed_configs/sites.json`.
+
+The floor dashboard is available at `/dashboard?site_id=highland_park_plant_01`.
+Its fleet metrics and API telemetry are scoped to that site. Each approved
+machine gets an in-process 1-second simulation worker using the existing
+`MachineSimulation` and OEE calculator, with optional MQTT output to
+`mca/{site_id}/{machine_id}/status` and
+`mca/{site_id}/{machine_id}/telemetry`. Set `MQTT_BROKER_HOST` and
+`MQTT_BROKER_PORT` to publish to a broker; the local HMI continues to show
+simulated telemetry when MQTT is unavailable. The dashboard's demo toggle
+controls workers only for its selected site.
 
 ### Onboard and Monitor Multiple Machines
 Run the agent once per machine. Assign a unique ID and site ID for every
